@@ -5,6 +5,17 @@ on:
     # UTC 23:00 = 한국시간 다음 날 오전 08:00 (월~금 발송)
     - cron: "0 23 * * 0-4"
   workflow_dispatch:
+    inputs:
+      use_sample:
+        description: "샘플 기사로 PDF 테스트"
+        required: false
+        type: boolean
+        default: true
+      send_kakao:
+        description: "카카오 알림톡까지 발송"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,7 +38,11 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: 기사 수집 및 PDF 생성
+      - name: 샘플 기사로 PDF 생성
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.use_sample == true }}
+        run: python -m src.briefing --input sample/articles.json
+      - name: 실제 기사 수집 및 PDF 생성
+        if: ${{ github.event_name == 'schedule' || inputs.use_sample != true }}
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
@@ -59,6 +74,7 @@ jobs:
 
   send-kakao:
     needs: [build, deploy]
+    if: ${{ github.event_name == 'schedule' || (inputs.send_kakao == true && inputs.use_sample != true) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,4 +88,3 @@ jobs:
           SOLAPI_RECIPIENTS: ${{ secrets.SOLAPI_RECIPIENTS }}
           REPORT_URL: ${{ needs.build.outputs.report_url }}
         run: python -m src.send_kakao
-
