@@ -1,0 +1,90 @@
+name: Daily News Briefing
+
+on:
+  schedule:
+    # UTC 23:00 = 한국시간 다음 날 오전 08:00 (월~금 발송)
+    - cron: "0 23 * * 0-4"
+  workflow_dispatch:
+    inputs:
+      use_sample:
+        description: "샘플 기사로 PDF 테스트"
+        required: false
+        type: boolean
+        default: true
+      send_kakao:
+        description: "카카오 알림톡까지 발송"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      report_url: ${{ steps.url.outputs.report_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: 샘플 기사로 PDF 생성
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.use_sample == true }}
+        run: python -m src.briefing --input sample/articles.json
+      - name: 실제 기사 수집 및 PDF 생성
+        if: ${{ github.event_name == 'schedule' || inputs.use_sample != true }}
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+        run: python -m src.briefing
+      - name: 배포 파일 준비
+        run: |
+          mkdir -p public/archive
+          cp output/pdf/대한토지신탁_뉴스클리핑.pdf public/latest.pdf
+          cp output/pdf/대한토지신탁_뉴스클리핑.pdf "public/archive/$(TZ=Asia/Seoul date +%F).pdf"
+          cp web/index.html public/index.html
+          cp output/articles.json public/articles.json
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: url
+        shell: bash
+        run: echo "report_url=https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/latest.pdf" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  send-kakao:
+    needs: [build, deploy]
+    if: ${{ github.event_name == 'schedule' || inputs.send_kakao == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 카카오 알림톡 발송
+        env:
+          SOLAPI_API_KEY: ${{ secrets.SOLAPI_API_KEY }}
+          SOLAPI_API_SECRET: ${{ secrets.SOLAPI_API_SECRET }}
+          SOLAPI_SENDER: ${{ secrets.SOLAPI_SENDER }}
+          SOLAPI_PF_ID: ${{ secrets.SOLAPI_PF_ID }}
+          SOLAPI_TEMPLATE_ID: ${{ secrets.SOLAPI_TEMPLATE_ID }}
+          SOLAPI_RECIPIENTS: ${{ secrets.SOLAPI_RECIPIENTS }}
+          REPORT_URL: ${{ needs.build.outputs.report_url }}
+        run: python -m src.send_kakao

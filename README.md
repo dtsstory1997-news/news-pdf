@@ -1,80 +1,197 @@
 from __future__ import annotations
 
-from datetime import date
+import argparse
+import email.utils
+import hashlib
+import html
+import json
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+from difflib import SequenceMatcher
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterable
 
-from reportlab.lib.colors import HexColor, white
-from reportlab.lib.enums import TA_RIGHT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.utils import ImageReader
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfgen.canvas import Canvas
-from reportlab.platypus import Paragraph
-
+KST = timezone(timedelta(hours=9))
 ROOT = Path(__file__).resolve().parents[1]
-NAVY, RED, OFFWHITE = HexColor("#102A43"), HexColor("#E50012"), HexColor("#FBFAF8")
-GRAY, LIGHTBLUE, BLACK = HexColor("#777777"), HexColor("#9FB3C8"), HexColor("#181818")
 
 
-def register_fonts() -> None:
-    font_dir = ROOT / "assets/fonts"
-    for name, filename in [("Pretendard", "Pretendard-Regular.ttf"), ("Pretendard-SemiBold", "Pretendard-SemiBold.ttf"), ("Pretendard-Bold", "Pretendard-Bold.ttf"), ("Pretendard-ExtraBold", "Pretendard-ExtraBold.ttf")]:
-        pdfmetrics.registerFont(TTFont(name, str(font_dir / filename)))
+@dataclass
+class Article:
+    section: str
+    title: str
+    summary: str
+    publisher: str
+    url: str
+    published_at: str
+    score: float = 0
 
 
-def paragraph(canvas: Canvas, text: str, x: float, y_top: float, width: float, height: float, style: ParagraphStyle) -> None:
-    p = Paragraph(text.replace("&", "&amp;"), style)
-    _, h = p.wrap(width, height)
-    p.drawOn(canvas, x, y_top - h)
+def clean(value: str) -> str:
+    value = html.unescape(re.sub(r"<[^>]+>", "", value or ""))
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def build_pdf(output: Path, articles: list, report_date: date, cfg: dict) -> None:
-    register_fonts()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    cards_per_page = cfg.get("cards_per_page", 5)
-    section_order = list(cfg["sections"])
-    pages: list[tuple[str, list]] = []
-    for section in section_order:
-        rows = [a for a in articles if a.section == section]
-        if not rows:
-            continue
-        for start in range(0, len(rows), cards_per_page):
-            pages.append((section, rows[start:start + cards_per_page]))
+def publisher_from(url: str) -> str:
+    host = urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+    labels = {
+        "yna.co.kr": "연합뉴스", "chosun.com": "조선일보", "biz.chosun.com": "조선비즈",
+        "joongang.co.kr": "중앙일보", "donga.com": "동아일보", "hani.co.kr": "한겨레",
+        "khan.co.kr": "경향신문", "hankookilbo.com": "한국일보", "mk.co.kr": "매일경제",
+        "hankyung.com": "한국경제", "sedaily.com": "서울경제", "fnnews.com": "파이낸셜뉴스",
+        "mt.co.kr": "머니투데이", "edaily.co.kr": "이데일리", "asiae.co.kr": "아시아경제",
+        "ajunews.com": "아주경제", "newsis.com": "뉴시스", "news1.kr": "뉴스1",
+        "dealsite.co.kr": "딜사이트", "thebell.co.kr": "더벨", "investchosun.com": "인베스트조선",
+        "reuters.com": "로이터", "bloomberg.com": "블룸버그"
+    }
+    for domain, name in labels.items():
+        if host == domain or host.endswith("." + domain):
+            return name
+    return host.split(".")[0].upper() or "언론사"
 
-    w, h = A4
-    c = Canvas(str(output), pagesize=A4, pageCompression=1)
-    c.setTitle(f"{cfg['briefing_title']} {report_date:%Y.%m.%d}")
-    total = len(pages)
-    for page_no, (section, rows) in enumerate(pages, 1):
-        c.setFillColor(NAVY); c.rect(0, 0, w, h, stroke=0, fill=1)
-        c.setFillColor(LIGHTBLUE); c.setFont("Pretendard-SemiBold", 11); c.drawString(34, h - 47, "N E W S   C L I P P I N G")
-        c.setFillColor(white); c.setFont("Pretendard-ExtraBold", 21); c.drawString(34, h - 75, cfg["briefing_title"])
-        c.setFont("Pretendard-Bold", 15); c.drawRightString(w - 34, h - 58, f"{report_date:%Y.%m.%d}")
-        c.setFillColor(LIGHTBLUE); c.setFont("Pretendard-SemiBold", 9); c.drawRightString(w - 34, h - 76, f"{page_no} / {total}")
-        c.setFillColor(RED); c.roundRect(34, h - 104, 55, 18, 9, stroke=0, fill=1)
-        c.setFillColor(white); c.setFont("Pretendard-Bold", 9); c.drawCentredString(61.5, h - 98, section)
 
-        top, bottom, gap = h - 118, 62, 11
-        card_h = (top - bottom - gap * (cards_per_page - 1)) / cards_per_page
-        title_style = ParagraphStyle("title", fontName="Pretendard-Bold", fontSize=12.5, leading=15.5, textColor=BLACK, maxLines=2)
-        body_style = ParagraphStyle("body", fontName="Pretendard", fontSize=9.2, leading=13.2, textColor=GRAY, maxLines=2)
-        for idx, a in enumerate(rows):
-            y = top - (idx + 1) * card_h - idx * gap
-            c.setFillColor(OFFWHITE); c.roundRect(34, y, w - 68, card_h, 9, stroke=0, fill=1)
-            c.setFillColor(RED); c.roundRect(50, y + card_h - 30, 43, 15, 7.5, stroke=0, fill=1)
-            c.setFillColor(white); c.setFont("Pretendard-Bold", 7.7); c.drawCentredString(71.5, y + card_h - 25, section)
-            c.setFillColor(HexColor("#9A9A9A")); c.setFont("Pretendard-SemiBold", 8.2); c.drawString(100, y + card_h - 25, a.publisher)
-            c.setFillColor(NAVY); c.setFont("Pretendard-Bold", 8.2); c.drawRightString(w - 51, y + card_h - 25, "원문 보기  →")
-            c.linkURL(a.url, (w - 116, y + card_h - 33, w - 48, y + card_h - 12), relative=0, thickness=0)
-            paragraph(c, a.title, 50, y + card_h - 39, w - 100, 34, title_style)
-            paragraph(c, a.summary, 50, y + card_h - 75, w - 100, 32, body_style)
+def naver_search(query: str, client_id: str, client_secret: str, display: int = 100) -> list[dict]:
+    params = urllib.parse.urlencode({"query": query, "display": display, "sort": "date"})
+    req = urllib.request.Request(
+        "https://openapi.naver.com/v1/search/news.json?" + params,
+        headers={"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret, "User-Agent": "KOREIT-Briefing/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as response:
+        return json.load(response).get("items", [])
 
-        c.setFillColor(LIGHTBLUE); c.setFont("Pretendard", 8); c.drawString(34, 34, "본 자료는 임직원 내부 공유용입니다.")
-        logo = ROOT / "assets/logo.png"
-        if logo.exists():
-            c.drawImage(ImageReader(str(logo)), w - 184, 24, width=150, height=21.4, mask="auto", preserveAspectRatio=True)
-        c.showPage()
-    c.save()
 
+def parse_date(value: str) -> datetime | None:
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+        return parsed.astimezone(KST)
+    except (TypeError, ValueError):
+        return None
+
+
+def title_key(title: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", title.lower())[:60]
+
+
+def similarity_text(article: Article | tuple[str, str]) -> str:
+    if isinstance(article, Article):
+        value = article.title + " " + article.summary
+    else:
+        value = article[0] + " " + article[1]
+    value = re.sub(r"\[[^]]+\]|\([^)]*\)", " ", value.lower())
+    return re.sub(r"[^0-9a-z가-힣]", "", value)
+
+
+def is_same_story(left: Article, right: Article) -> bool:
+    lt, rt = title_key(left.title), title_key(right.title)
+    if lt == rt:
+        return True
+    title_ratio = SequenceMatcher(None, lt, rt).ratio()
+    if title_ratio >= 0.72:
+        return True
+    ls, rs = similarity_text(left), similarity_text(right)
+    return SequenceMatcher(None, ls[:180], rs[:180]).ratio() >= 0.68
+
+
+def deduplicate_ranked(candidates: list[Article]) -> list[Article]:
+    """점수가 높은 주요 일간지·금융지 기사를 먼저 남기고 유사 기사를 제거합니다."""
+    unique: list[Article] = []
+    for article in sorted(candidates, key=lambda x: (x.score, x.published_at), reverse=True):
+        if not any(is_same_story(article, saved) for saved in unique):
+            unique.append(article)
+    return unique
+
+
+def score_item(section: str, title: str, summary: str, url: str, published: datetime, cfg: dict) -> float:
+    text = (title + " " + summary).lower()
+    domain = urllib.parse.urlparse(url).netloc.lower()
+    age = max(0, (datetime.now(KST) - published).total_seconds() / 3600)
+    score = max(0, 24 - age) * 0.15
+    # 동일 사건이 여러 매체에 보도된 경우 주요 일간지·금융지가 확실히 우선되도록 큰 가중치를 부여합니다.
+    score += 25 if any(domain.endswith(d) for d in cfg["preferred_domains"]) else 0
+    score += min(12, len(title) / 10)
+    if section == "부동산":
+        for rank, keyword in enumerate(cfg["priority_keywords"]):
+            if keyword.lower() in text:
+                score += 35 - rank * 2
+        if "대한토지신탁" in text or "대토신" in text:
+            score += 100
+    return score
+
+
+def collect(cfg: dict) -> list[Article]:
+    client_id = os.environ.get("NAVER_CLIENT_ID")
+    client_secret = os.environ.get("NAVER_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise RuntimeError("NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET이 필요합니다.")
+    cutoff = datetime.now(KST) - timedelta(hours=cfg["lookback_hours"])
+    chosen: list[Article] = []
+    global_seen: set[str] = set()
+
+    collection_order = list(cfg["sections"])
+    for section in collection_order:
+        queries = cfg["sections"][section]
+        candidates: list[Article] = []
+        for query in queries:
+            for item in naver_search(query, client_id, client_secret):
+                published = parse_date(item.get("pubDate", ""))
+                if not published or published < cutoff:
+                    continue
+                title, summary = clean(item.get("title", "")), clean(item.get("description", ""))
+                url = item.get("originallink") or item.get("link") or ""
+                combined = (title + " " + summary).lower()
+                if not title or not url or any(word.lower() in combined for word in cfg["exclude_keywords"]):
+                    continue
+                if summary and summary[-1] not in ".!?다요":
+                    summary += "."
+                candidates.append(Article(section, title, summary[:230], publisher_from(url), url, published.isoformat(), score_item(section, title, summary, url, published, cfg)))
+        candidates = deduplicate_ranked(candidates)
+        selected = []
+        for candidate in candidates:
+            if title_key(candidate.title) in global_seen:
+                continue
+            if any(is_same_story(candidate, previous) for previous in chosen):
+                continue
+            selected.append(candidate)
+            if len(selected) >= cfg["max_articles_per_section"]:
+                break
+        for article in selected:
+            global_seen.add(title_key(article.title))
+        chosen.extend(selected)
+        print(f"{section}: {len(selected)}건 선택 ({len(candidates)}건 후보)")
+    return chosen
+
+
+def load_articles(path: Path) -> list[Article]:
+    return [Article(**row) for row in json.loads(path.read_text(encoding="utf-8"))]
+
+
+def save_articles(path: Path, articles: Iterable[Article]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([asdict(a) for a in articles], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=ROOT / "config.json", type=Path)
+    parser.add_argument("--input", type=Path, help="수집 대신 기존 JSON 사용")
+    parser.add_argument("--data-output", default=ROOT / "output/articles.json", type=Path)
+    parser.add_argument("--pdf-output", default=ROOT / "output/pdf/대한토지신탁_뉴스클리핑.pdf", type=Path)
+    parser.add_argument("--date", help="표시 날짜 YYYY-MM-DD")
+    args = parser.parse_args()
+    cfg = json.loads(args.config.read_text(encoding="utf-8"))
+    articles = load_articles(args.input) if args.input else collect(cfg)
+    if not articles:
+        raise RuntimeError("선정된 기사가 없습니다.")
+    save_articles(args.data_output, articles)
+    from src.pdf_report import build_pdf
+    report_date = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else datetime.now(KST).date()
+    build_pdf(args.pdf_output, articles, report_date, cfg)
+    print(args.pdf_output)
+
+
+if __name__ == "__main__":
+    main()
